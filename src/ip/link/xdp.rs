@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: MIT
 
-use std::{fs, mem::size_of, slice};
+use std::{
+    ffi::OsStr,
+    fs,
+    mem::size_of,
+    os::fd::{AsFd, AsRawFd},
+    slice,
+};
 
 use iproute_rs::CliError;
+use libbpf_rs::{ObjectBuilder, ProgramAttachType, ProgramType};
 use rtnetlink::packet_route::link::LinkXdp;
 
 const XDP_FLAGS_UPDATE_IF_NOEXIST: u32 = 1;
@@ -242,7 +249,98 @@ fn find_elf_section<'a>(
     )))
 }
 
+/// Load an XDP object through libbpf so relocations, maps, BTF, and CO-RE
+/// processing are available to `ip link` users.
+fn load_bpf_object_libbpf(
+    filename: &str,
+    section: &str,
+    verbose: bool,
+) -> Result<i32, CliError> {
+    let mut builder = ObjectBuilder::default();
+    builder.debug(verbose);
+
+    let mut open = builder.open_file(filename).map_err(|error| {
+        CliError::from(format!(
+            "libbpf could not open BPF object '{filename}': {error}"
+        ))
+    })?;
+
+    let mut target_found = false;
+    for mut program in open.progs_mut() {
+        let is_target = program.section() == OsStr::new(section);
+        program.set_autoload(is_target);
+        if is_target {
+            // An arbitrary section name is valid in `ip link`; explicitly
+            // give libbpf the program and expected attach type that the
+            // kernel needs for an XDP netlink attachment.
+            program.set_prog_type(ProgramType::Xdp);
+            program.set_attach_type(ProgramAttachType::Xdp);
+            program.set_log_level(u32::from(verbose));
+            target_found = true;
+        }
+    }
+
+    if !target_found {
+        return Err(CliError::from(format!(
+            "Section '{section}' not found in BPF object file"
+        )));
+    }
+
+    let object = open.load().map_err(|error| {
+        CliError::from(format!(
+            "libbpf could not load BPF object '{filename}': {error}"
+        ))
+    })?;
+
+    let program = object
+        .progs()
+        .find(|program| program.section() == OsStr::new(section))
+        .ok_or_else(|| {
+            CliError::from(format!(
+                "Loaded BPF object no longer contains section '{section}'"
+            ))
+        })?;
+
+    // The netlink message only carries the program fd.  Duplicate it before
+    // libbpf closes the owning object at function return.
+    let fd = unsafe { libc::dup(program.as_fd().as_raw_fd()) };
+    if fd < 0 {
+        return Err(CliError::from(format!(
+            "Could not duplicate loaded BPF program fd: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    Ok(fd)
+}
+
+/// Load an XDP object with the small raw syscall loader retained as a
+/// compatibility fallback for simple instruction-only objects.  libbpf is
+/// attempted first because it handles modern ELF features correctly.
 fn load_bpf_object(
+    filename: &str,
+    section: &str,
+    verbose: bool,
+) -> Result<i32, CliError> {
+    match load_bpf_object_libbpf(filename, section, verbose) {
+        Ok(fd) => return Ok(fd),
+        Err(libbpf_error) => {
+            match load_bpf_object_raw(filename, section, verbose) {
+                Ok(fd) => return Ok(fd),
+                Err(raw_error) => {
+                    return Err(CliError::from(format!(
+                        "{libbpf_error}; raw BPF loader fallback also failed: \
+                         {raw_error}"
+                    )));
+                }
+            }
+        }
+    }
+}
+
+/// Load a section directly with `BPF_PROG_LOAD` for minimal environments or
+/// instruction-only test objects that libbpf cannot parse.
+fn load_bpf_object_raw(
     filename: &str,
     section: &str,
     verbose: bool,

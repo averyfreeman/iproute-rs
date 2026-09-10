@@ -7,7 +7,10 @@ use indexmap::IndexMap;
 use iproute_rs::{CanDisplay, CanOutput, CliColor, write_with_color};
 use rtnetlink::packet_route::{
     AddressFamily,
-    address::{AddressAttribute, AddressFlags, AddressMessage, AddressScope},
+    address::{
+        AddressAttribute, AddressFlags, AddressMessage, AddressProtocol,
+        AddressScope,
+    },
 };
 use serde::Serialize;
 
@@ -19,6 +22,8 @@ pub(crate) struct CliAddressInfo {
     index: u32,
     #[serde(skip)]
     brief: bool,
+    #[serde(skip)]
+    oneline: bool,
     family: String,
     local: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,7 +173,8 @@ impl std::fmt::Display for CliAddressInfo {
         write!(f, "{}", self.label)?;
         write!(
             f,
-            "\n       valid_lft {} preferred_lft {}",
+            "{}valid_lft {} preferred_lft {}",
+            if self.oneline { " " } else { "\n       " },
             if self.valid_life_time == u32::MAX {
                 "forever".to_string()
             } else {
@@ -188,6 +194,11 @@ impl std::fmt::Display for CliAddressInfo {
 }
 
 impl CliAddressInfo {
+    /// Select `ip -o`-style single-line rendering for this address.
+    pub(crate) fn set_oneline(&mut self, oneline: bool) {
+        self.oneline = oneline;
+    }
+
     fn write_flags(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for flag_name in self.flags.iter().filter_map(|(flag_name, value)| {
             if *value { Some(flag_name) } else { None }
@@ -278,7 +289,12 @@ pub(crate) fn parse_nl_msg_to_address(
                 preferred_life_time = c.ifa_preferred;
             }
             AddressAttribute::Flags(f) => flags = f,
-            AddressAttribute::Protocol(p) => protocol = p.to_string(),
+            AddressAttribute::Protocol(p) => {
+                protocol = match p {
+                    AddressProtocol::Other(value) => format!("0x{value:x}"),
+                    _ => p.to_string(),
+                };
+            }
             _ => {}
         }
     }
@@ -299,6 +315,7 @@ pub(crate) fn parse_nl_msg_to_address(
     let cli_addr_info = CliAddressInfo {
         index,
         brief,
+        oneline: false,
         family,
         local,
         peer,
@@ -698,6 +715,8 @@ pub(crate) async fn handle_show(
     include_details: bool,
     preferred_family: Option<AddressFamily>,
     brief: bool,
+    include_stats: bool,
+    oneline: bool,
 ) -> Result<Vec<CliLinkInfo>, CliError> {
     let (addr_filter, link_opts) = AddressShowFilter::parse(opts)?;
     let link_opts_refs: Vec<&str> =
@@ -740,22 +759,28 @@ pub(crate) async fn handle_show(
             continue;
         }
         let addr_info = parse_nl_msg_to_address(msg.clone(), brief)?;
+        let mut addr_info = addr_info;
+        addr_info.set_oneline(oneline);
         if addr_filter.matches(&addr_info, msg) {
             addresses_infos.push(addr_info);
         }
     }
 
-    let mut links_info: HashMap<u32, _> =
-        crate::link::handle_show(&link_opts_refs, include_details)
-            .await?
-            .into_iter()
-            .map(|mut link_info| {
-                link_info.show_only_addr_details();
-                link_info.set_brief(brief);
-                link_info
-            })
-            .map(|link_info| (link_info.get_ifindex(), link_info))
-            .collect();
+    let mut links_info: HashMap<u32, _> = crate::link::handle_show(
+        &link_opts_refs,
+        include_details,
+        include_stats,
+        oneline,
+    )
+    .await?
+    .into_iter()
+    .map(|mut link_info| {
+        link_info.show_only_addr_details();
+        link_info.set_brief(brief);
+        link_info
+    })
+    .map(|link_info| (link_info.get_ifindex(), link_info))
+    .collect();
 
     for addr_info in addresses_infos {
         if let Some(link_info) = links_info.get_mut(&addr_info.index) {

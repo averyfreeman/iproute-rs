@@ -24,7 +24,7 @@ const IPROUTE2_FLAGS_ORDER: [LinkFlags; 18] = [
     LinkFlags::Echo,
 ];
 
-/// Convert [LinkFlags] to Vec<String> using iproute2 order
+/// Convert [LinkFlags] to `Vec<String>` using iproute2 order.
 pub fn link_flags_to_string(mut flags: LinkFlags) -> Vec<String> {
     let mut ret: Vec<String> = Vec::new();
 

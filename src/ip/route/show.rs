@@ -1,20 +1,26 @@
 // SPDX-License-Identifier: MIT
 
-use std::{collections::HashMap, net::IpAddr};
+//! Route dump decoding, display, and application-side selector matching.
+
+use std::{
+    collections::{BTreeMap, HashMap},
+    net::IpAddr,
+};
 
 use futures_util::TryStreamExt;
 use iproute_rs::{CanDisplay, CanOutput, CliColor, write_with_color};
 use rtnetlink::packet_route::{
     AddressFamily,
+    link::LinkAttribute as RouteLinkAttribute,
     route::{
         RouteAttribute, RouteCacheInfo, RouteFlags, RouteHeader, RouteMessage,
-        RouteNextHopFlags, RoutePreference, RouteProtocol, RouteScope,
-        RouteType,
+        RouteMetric, RouteMplsTtlPropagation, RouteNextHopFlags,
+        RoutePreference, RouteProtocol, RouteScope, RouteType,
     },
 };
 use serde::Serialize;
 
-use crate::CliError;
+use crate::{CliError, vrf::vrf_table_id};
 
 fn hex_encode(data: &[u8]) -> String {
     data.iter().map(|b| format!("{b:02x}")).collect()
@@ -64,6 +70,35 @@ pub(crate) struct CliRouteInfo {
     pub(crate) iif: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) ttl_propagate: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) expires: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) realm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) encap: Option<String>,
+    /// Debug-friendly representation of the nested lightweight-tunnel
+    /// attributes.  The public packet type is intentionally retained as text
+    /// until the packet crate exposes a stable structured display contract.
+    #[serde(skip)]
+    encap_details: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) nhid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ip_proto: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sport: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dport: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) flowlabel: Option<u32>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) metrics: BTreeMap<String, u32>,
+    /// The raw table ID is retained for filters even when text output uses a
+    /// named table or omits the default `main` table.
+    #[serde(skip)]
+    pub(crate) table_id: u32,
+    #[serde(skip)]
+    pub(crate) oneline: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) nexthops: Vec<CliRouteNextHop>,
 }
@@ -221,6 +256,7 @@ pub(crate) fn parse_nl_msg_to_route(
         dst: String::new(),
         dst_len: nl_msg.header.destination_prefix_length,
         src_len: nl_msg.header.source_prefix_length,
+        table_id: u32::from(nl_msg.header.table),
         ..Default::default()
     };
 
@@ -313,6 +349,7 @@ pub(crate) fn parse_nl_msg_to_route(
             RouteAttribute::Oif(idx) => oif_index = Some(idx),
             RouteAttribute::Iif(idx) => iif_index = Some(idx),
             RouteAttribute::Table(t) => {
+                info.table_id = t;
                 // Use named table if known, otherwise numeric
                 if t == 254 || t == 0 {
                     // Skip main/unspec - will be handled by header below
@@ -324,6 +361,59 @@ pub(crate) fn parse_nl_msg_to_route(
             RouteAttribute::Uid(u) => info.uid = Some(u),
             RouteAttribute::Preference(p) => {
                 info.preference = Some(route_preference_to_string(p))
+            }
+            RouteAttribute::Expires(value) => info.expires = Some(value),
+            RouteAttribute::Realm(realm) => {
+                info.realm =
+                    Some(format!("{}/{}", realm.source, realm.destination));
+            }
+            RouteAttribute::EncapType(encap) => {
+                info.encap = Some(encap.to_string());
+            }
+            RouteAttribute::Encap(encap) => {
+                info.encap_details = Some(format!("{encap:?}"));
+            }
+            RouteAttribute::NhId(value) => info.nhid = Some(value),
+            RouteAttribute::IpProto(value) => info.ip_proto = Some(value),
+            RouteAttribute::Sport(value) => info.sport = Some(value),
+            RouteAttribute::Dport(value) => info.dport = Some(value),
+            RouteAttribute::Flowlabel(value) => info.flowlabel = Some(value),
+            RouteAttribute::TtlPropagate(value) => {
+                info.ttl_propagate = match value {
+                    RouteMplsTtlPropagation::Enabled => Some(true),
+                    RouteMplsTtlPropagation::Disabled => Some(false),
+                    RouteMplsTtlPropagation::Default
+                    | RouteMplsTtlPropagation::Other(_) => None,
+                    _ => None,
+                };
+            }
+            RouteAttribute::Metrics(metrics) => {
+                for metric in metrics {
+                    let (name, value) = match metric {
+                        RouteMetric::Lock(value) => ("lock", value),
+                        RouteMetric::Mtu(value) => ("mtu", value),
+                        RouteMetric::Window(value) => ("window", value),
+                        RouteMetric::Rtt(value) => ("rtt", value),
+                        RouteMetric::RttVar(value) => ("rttvar", value),
+                        RouteMetric::SsThresh(value) => ("ssthresh", value),
+                        RouteMetric::Cwnd(value) => ("cwnd", value),
+                        RouteMetric::Advmss(value) => ("advmss", value),
+                        RouteMetric::Reordering(value) => ("reordering", value),
+                        RouteMetric::Hoplimit(value) => ("hoplimit", value),
+                        RouteMetric::InitCwnd(value) => ("initcwnd", value),
+                        RouteMetric::Features(value) => ("features", value),
+                        RouteMetric::RtoMin(value) => ("rto_min", value),
+                        RouteMetric::InitRwnd(value) => ("initrwnd", value),
+                        RouteMetric::QuickAck(value) => ("quickack", value),
+                        RouteMetric::CcAlgo(value) => ("congctl", value),
+                        RouteMetric::FastopenNoCookie(value) => {
+                            ("fastopen_no_cookie", value)
+                        }
+                        RouteMetric::Other(_) => continue,
+                        _ => continue,
+                    };
+                    info.metrics.insert(name.to_owned(), value);
+                }
             }
             RouteAttribute::CacheInfo(c) => info.cache_info = Some(c),
             RouteAttribute::MultiPath(nhs) => {
@@ -353,6 +443,16 @@ pub(crate) fn parse_nl_msg_to_route(
                                     _ => String::new(),
                                 });
                             }
+                            RouteAttribute::Oif(index) => {
+                                cli_nh.oif = Some(
+                                    link_map
+                                        .get(&index)
+                                        .cloned()
+                                        .unwrap_or_else(|| {
+                                            format!("if{index}")
+                                        }),
+                                );
+                            }
                             _ => {}
                         }
                     }
@@ -361,6 +461,11 @@ pub(crate) fn parse_nl_msg_to_route(
             }
             _ => {}
         }
+    }
+
+    if let Some(details) = info.encap_details.take() {
+        let kind = info.encap.take().unwrap_or_else(|| "unknown".to_owned());
+        info.encap = Some(format!("{kind} {details}"));
     }
 
     // Resolve OIF/IIF index to name
@@ -425,6 +530,10 @@ pub(crate) fn parse_nl_msg_to_route(
     let show_scope = scope != RouteScope::Universe || show_details;
     if show_scope {
         info.scope = Some(route_scope_to_string(scope));
+    }
+
+    if nl_msg.header.tos != 0 || show_details {
+        info.tos = Some(nl_msg.header.tos);
     }
 
     info.flags = route_flags_to_strings(nl_msg.header.flags);
@@ -510,6 +619,18 @@ impl std::fmt::Display for CliRouteInfo {
             write!(buf, "metric {metric} ")?;
         }
 
+        if let Some(expires) = self.expires {
+            write!(buf, "expires {expires}sec ")?;
+        }
+
+        if let Some(ref realm) = self.realm {
+            write!(buf, "realms {realm} ")?;
+        }
+
+        if let Some(ref encap) = self.encap {
+            write!(buf, "encap {encap} ")?;
+        }
+
         // Flags
         for flag in &self.flags {
             write!(buf, "{flag} ")?;
@@ -541,6 +662,25 @@ impl std::fmt::Display for CliRouteInfo {
             } else {
                 write!(buf, "ttl-propagate disabled ")?;
             }
+        }
+
+        if let Some(nhid) = self.nhid {
+            write!(buf, "nhid {nhid} ")?;
+        }
+        if let Some(ip_proto) = self.ip_proto {
+            write!(buf, "ipproto {ip_proto} ")?;
+        }
+        if let Some(sport) = self.sport {
+            write!(buf, "sport {sport} ")?;
+        }
+        if let Some(dport) = self.dport {
+            write!(buf, "dport {dport} ")?;
+        }
+        if let Some(flowlabel) = self.flowlabel {
+            write!(buf, "flowlabel {flowlabel} ")?;
+        }
+        for (name, value) in &self.metrics {
+            write!(buf, "{name} {value} ")?;
         }
 
         // Cache info
@@ -577,7 +717,12 @@ impl std::fmt::Display for CliRouteInfo {
 
         // Nexthops (multipath)
         for nh in &self.nexthops {
-            buf.push_str("\n\tnexthop");
+            if self.oneline {
+                buf.push(' ');
+            } else {
+                buf.push_str("\n\t");
+            }
+            buf.push_str("nexthop");
             if let Some(ref gw) = nh.gateway {
                 write!(buf, " via {gw}")?;
             }
@@ -604,6 +749,22 @@ impl CanDisplay for CliRouteInfo {
 
 impl CanOutput for CliRouteInfo {}
 
+impl CliRouteInfo {
+    /// Select `ip -o`-style single-line rendering for this route.
+    pub(crate) fn set_oneline(&mut self, oneline: bool) {
+        self.oneline = oneline;
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PrefixMatchMode {
+    #[default]
+    Exact,
+    Root,
+    Match,
+}
+
 #[allow(dead_code)]
 pub(crate) struct RouteShowFilter {
     pub(crate) tb: Option<u32>,
@@ -621,8 +782,10 @@ pub(crate) struct RouteShowFilter {
     pub(crate) rvia: Option<IpAddr>,
     pub(crate) rprefsrc: Option<IpAddr>,
     pub(crate) rdst: Option<(IpAddr, u8)>,
+    rdst_mode: PrefixMatchMode,
     pub(crate) rsrc: Option<(IpAddr, u8)>,
     pub(crate) dev_name: Option<String>,
+    vrf: Option<String>,
 }
 
 impl RouteShowFilter {
@@ -644,8 +807,10 @@ impl RouteShowFilter {
         let mut rvia: Option<IpAddr> = None;
         let mut rprefsrc: Option<IpAddr> = None;
         let mut rdst: Option<(IpAddr, u8)> = None;
+        let mut rdst_mode = PrefixMatchMode::Exact;
         let mut rsrc: Option<(IpAddr, u8)> = None;
         let mut dev_name: Option<String> = None;
+        let mut vrf: Option<String> = None;
         let mut link_opts: Vec<String> = Vec::new();
 
         let mut iter = opts.iter().peekable();
@@ -738,6 +903,27 @@ impl RouteShowFilter {
                         CliError::from(format!("invalid address: {val}"))
                     })?);
                 }
+                "root" => {
+                    let val = iter.next().ok_or_else(|| {
+                        CliError::from("\"root\" requires a prefix")
+                    })?;
+                    rdst = Some(parse_prefix_val(val)?);
+                    rdst_mode = PrefixMatchMode::Root;
+                }
+                "match" => {
+                    let val = iter.next().ok_or_else(|| {
+                        CliError::from("\"match\" requires a prefix")
+                    })?;
+                    rdst = Some(parse_prefix_val(val)?);
+                    rdst_mode = PrefixMatchMode::Match;
+                }
+                "exact" => {
+                    let val = iter.next().ok_or_else(|| {
+                        CliError::from("\"exact\" requires a prefix")
+                    })?;
+                    rdst = Some(parse_prefix_val(val)?);
+                    rdst_mode = PrefixMatchMode::Exact;
+                }
                 "from" => {
                     let val = iter.next().ok_or_else(|| {
                         CliError::from("\"from\" requires a value")
@@ -749,6 +935,15 @@ impl RouteShowFilter {
                         CliError::from("\"to\" requires a value")
                     })?;
                     rdst = Some(parse_prefix_val(val)?);
+                }
+                "vrf" => {
+                    vrf = Some(
+                        iter.next()
+                            .ok_or_else(|| {
+                                CliError::from("\"vrf\" requires a name")
+                            })?
+                            .to_string(),
+                    );
                 }
                 _ => {
                     if rdst.is_none() && !arg.starts_with('-') {
@@ -787,16 +982,23 @@ impl RouteShowFilter {
                 rvia,
                 rprefsrc,
                 rdst,
+                rdst_mode,
                 rsrc,
                 dev_name,
+                vrf,
             },
             link_opts,
         ))
     }
 
-    fn parse_dst(s: &str) -> Option<(IpAddr, u8)> {
+    fn parse_dst(s: &str, family: AddressFamily) -> Option<(IpAddr, u8)> {
         if s == "default" {
-            return Some((IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)), 0));
+            return Some(match family {
+                AddressFamily::Inet6 => {
+                    (IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0)
+                }
+                _ => (IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+            });
         }
         let (addr_str, plen_str) = s.split_once('/').unwrap_or((s, "32"));
         let addr = addr_str.parse::<IpAddr>().ok()?;
@@ -812,11 +1014,7 @@ impl RouteShowFilter {
 
     pub(crate) fn matches(&self, route: &CliRouteInfo) -> bool {
         if let Some(tb) = self.tb {
-            let table_val = route
-                .table
-                .as_deref()
-                .and_then(|t| t.parse::<u32>().ok())
-                .unwrap_or(0);
+            let table_val = route.table_id;
             if tb != 0 && table_val != tb {
                 return false;
             }
@@ -947,26 +1145,39 @@ impl RouteShowFilter {
             }
         }
 
-        if let Some((ref dst_addr, _dst_plen)) = self.rdst {
-            if let Some((route_addr, _)) = Self::parse_dst(&route.dst) {
-                if route_addr != *dst_addr {
-                    return false;
-                }
-            } else {
+        if let Some((ref dst_addr, dst_plen)) = self.rdst {
+            let Some((route_addr, route_plen)) =
+                Self::parse_dst(&route.dst, route.family)
+            else {
+                return false;
+            };
+            if !prefix_matches(
+                *dst_addr,
+                dst_plen,
+                route_addr,
+                route_plen,
+                self.rdst_mode,
+            ) {
                 return false;
             }
         }
 
-        if let Some((ref src_addr, _src_plen)) = self.rsrc {
-            if let Some(ref src) = route.src {
-                if let Ok(addr) = src.parse::<IpAddr>() {
-                    if addr != *src_addr {
-                        return false;
-                    }
-                } else {
-                    return false;
-                }
-            } else {
+        if let Some((ref src_addr, src_plen)) = self.rsrc {
+            let Some(src) = route.src.as_deref() else {
+                return false;
+            };
+            let Some((route_addr, route_plen)) =
+                Self::parse_dst(src, route.family)
+            else {
+                return false;
+            };
+            if !prefix_matches(
+                *src_addr,
+                src_plen,
+                route_addr,
+                route_plen,
+                PrefixMatchMode::Exact,
+            ) {
                 return false;
             }
         }
@@ -1004,6 +1215,52 @@ impl RouteShowFilter {
         }
         if self.rdst.is_some() {
             // Don't strip 'dst' - it's always shown
+        }
+    }
+}
+
+/// Apply the three route-prefix selector modes documented by `ip route`.
+fn prefix_matches(
+    filter_addr: IpAddr,
+    filter_len: u8,
+    route_addr: IpAddr,
+    route_len: u8,
+    mode: PrefixMatchMode,
+) -> bool {
+    let (filter_bits, route_bits, max_len) = match (filter_addr, route_addr) {
+        (IpAddr::V4(filter), IpAddr::V4(route)) => {
+            (u32::from(filter) as u128, u32::from(route) as u128, 32)
+        }
+        (IpAddr::V6(filter), IpAddr::V6(route)) => {
+            (u128::from(filter), u128::from(route), 128)
+        }
+        _ => return false,
+    };
+    if filter_len > max_len || route_len > max_len {
+        return false;
+    }
+
+    let same_network = |left: u128, right: u128, length: u8| {
+        if length == 0 {
+            true
+        } else {
+            let shift = max_len - length;
+            (left >> shift) == (right >> shift)
+        }
+    };
+
+    match mode {
+        PrefixMatchMode::Exact => {
+            route_len == filter_len
+                && same_network(filter_bits, route_bits, filter_len)
+        }
+        PrefixMatchMode::Root => {
+            route_len >= filter_len
+                && same_network(filter_bits, route_bits, filter_len)
+        }
+        PrefixMatchMode::Match => {
+            route_len <= filter_len
+                && same_network(filter_bits, route_bits, route_len)
         }
     }
 }
@@ -1117,15 +1374,14 @@ pub(crate) async fn handle_show(
     preferred_family: Option<AddressFamily>,
     show_details: bool,
 ) -> Result<Vec<CliRouteInfo>, CliError> {
-    let (filter, _link_opts) = RouteShowFilter::parse(opts)?;
-
-    let show_all_tables = filter.tb == Some(0);
+    let (mut filter, _link_opts) = RouteShowFilter::parse(opts)?;
 
     let (connection, handle, _) = rtnetlink::new_connection()?;
     tokio::spawn(connection);
 
     // Build link index -> name map
     let mut link_map: HashMap<u32, String> = HashMap::new();
+    let mut vrf_tables: HashMap<String, u32> = HashMap::new();
     let mut links = handle.link().get().execute();
     while let Ok(Some(link)) = links.try_next().await {
         let ifname = link
@@ -1142,8 +1398,27 @@ pub(crate) async fn handle_show(
                 }
             })
             .unwrap_or_else(|| format!("if{}", link.header.index));
+        let vrf_table = link.attributes.iter().find_map(|attribute| {
+            let RouteLinkAttribute::LinkInfo(infos) = attribute else {
+                return None;
+            };
+            vrf_table_id(infos)
+        });
         link_map.insert(link.header.index, ifname);
+        if let Some(table) = vrf_table {
+            if let Some(name) = link_map.get(&link.header.index) {
+                vrf_tables.insert(name.clone(), table);
+            }
+        }
     }
+
+    if let Some(vrf) = filter.vrf.take() {
+        filter.tb = Some(*vrf_tables.get(&vrf).ok_or_else(|| {
+            CliError::from(format!("VRF device \"{vrf}\" does not exist"))
+        })?);
+    }
+
+    let show_all_tables = filter.tb == Some(0);
 
     let msg = RouteMessage::default();
     let mut routes = handle.route().get(msg).execute();

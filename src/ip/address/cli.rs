@@ -246,6 +246,8 @@ impl AddressCommand {
                 matches.get_count("DETAILS") > 0,
                 preferred_family,
                 matches.get_flag("BRIEF"),
+                matches.get_flag("STATISTICS"),
+                matches.get_flag("ONELINE"),
             )
             .await
         } else {
@@ -254,6 +256,8 @@ impl AddressCommand {
                 matches.get_count("DETAILS") > 0,
                 preferred_family,
                 matches.get_flag("BRIEF"),
+                matches.get_flag("STATISTICS"),
+                matches.get_flag("ONELINE"),
             )
             .await
         }

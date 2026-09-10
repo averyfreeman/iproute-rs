@@ -167,6 +167,17 @@ fn parse_get_config(
                     family = addr_to_family(&addr);
                 }
             }
+            "as" => {
+                let val = iter.next().ok_or_else(|| {
+                    CliError::from("\"as\" requires a source address")
+                })?;
+                let (addr, plen) = parse_get_prefix(val)?;
+                from = Some(addr);
+                from_len = plen;
+                if family == AddressFamily::Unspec {
+                    family = addr_to_family(&addr);
+                }
+            }
             "tos" | "dsfield" => {
                 let val = iter.next().ok_or_else(|| {
                     CliError::from("\"tos\" requires a value")
@@ -189,6 +200,17 @@ fn parse_get_config(
                     iter.next()
                         .ok_or_else(|| {
                             CliError::from("\"dev\" requires a value")
+                        })?
+                        .clone(),
+                );
+            }
+            "vrf" => {
+                // A VRF lookup is represented by the VRF device as the
+                // output interface in RTM_GETROUTE.
+                oif = Some(
+                    iter.next()
+                        .ok_or_else(|| {
+                            CliError::from("\"vrf\" requires a name")
                         })?
                         .clone(),
                 );

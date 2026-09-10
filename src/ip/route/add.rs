@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MIT
 
+//! Parser and typed configuration model for route mutations.
+//!
+//! The parser accepts the compatibility-oriented `ip route` node syntax and
+//! leaves interface-name resolution to the asynchronous modify path.
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use futures_util::TryStreamExt;
@@ -8,7 +13,8 @@ use rtnetlink::{
     packet_route::{
         AddressFamily,
         route::{
-            RouteMetric, RouteProtocol, RouteRealm, RouteScope, RouteType,
+            MplsLabel, RouteMetric, RouteMplsTtlPropagation, RouteNextHopFlags,
+            RouteProtocol, RouteRealm, RouteScope, RouteType, Seg6Mode,
         },
     },
 };
@@ -33,9 +39,63 @@ pub(crate) struct RouteAddConfig {
     pub(crate) mark: Option<u32>,
     pub(crate) uid: Option<u32>,
     pub(crate) preference: Option<u8>,
+    /// Type-of-service selector stored in the route header.
+    pub(crate) tos: Option<u8>,
+    /// MPLS TTL propagation policy carried by `RTA_TTL_PROPAGATE`.
+    pub(crate) ttl_propagate: Option<RouteMplsTtlPropagation>,
+    /// Shared nexthop ID, when the route refers to a kernel nexthop object.
+    pub(crate) nhid: Option<u32>,
+    /// Flow dissector attributes used by `ip route get` and policy routes.
+    pub(crate) ip_proto: Option<u8>,
+    pub(crate) sport: Option<u16>,
+    pub(crate) dport: Option<u16>,
+    pub(crate) flowlabel: Option<u32>,
+    /// Route-level `pervasive` flag.
+    pub(crate) pervasive: bool,
+    /// Inline multipath entries from repeated `nexthop` clauses.
+    pub(crate) nexthops: Vec<RouteNextHopConfig>,
+    /// Supported lightweight tunnel encapsulation attributes.
+    pub(crate) encap: Option<RouteEncapConfig>,
     pub(crate) family: Option<AddressFamily>,
     pub(crate) metrics: Vec<RouteMetric>,
     pub(crate) realm: Option<RouteRealm>,
+}
+
+/// One inline `nexthop` clause in a multipath route.
+#[derive(Debug, Default)]
+pub(crate) struct RouteNextHopConfig {
+    pub(crate) via: Option<IpAddr>,
+    pub(crate) dev: Option<String>,
+    /// Kernel stores weight minus one in `rtnexthop::rtnh_hops`.
+    pub(crate) weight: Option<u8>,
+    pub(crate) flags: RouteNextHopFlags,
+}
+
+/// Encapsulation forms whose wire representation is available in
+/// `netlink-packet-route`.
+#[derive(Debug, Clone)]
+pub(crate) enum RouteEncapConfig {
+    /// MPLS labels carried by an IPv4/IPv6 route.
+    Mpls {
+        labels: Vec<MplsLabel>,
+        ttl: Option<u8>,
+    },
+    /// Segment-routing IPv6 header.
+    Seg6 {
+        mode: Seg6Mode,
+        segments: Vec<Ipv6Addr>,
+    },
+    /// IPv6 tunnel metadata used by the lightweight tunnel family.
+    Ip6 {
+        id: Option<u64>,
+        destination: Option<Ipv6Addr>,
+        source: Option<Ipv6Addr>,
+        hoplimit: Option<u8>,
+        traffic_class: Option<u8>,
+        /// Raw `LWTUNNEL_IP6_FLAGS` bits; the packet crate keeps this type
+        /// private, so they are encoded as a two-byte big-endian NLA.
+        flags: u16,
+    },
 }
 
 pub(crate) fn parse_route_config(
@@ -59,6 +119,16 @@ pub(crate) fn parse_route_config(
     let mut mark: Option<u32> = None;
     let mut uid: Option<u32> = None;
     let mut preference: Option<u8> = None;
+    let mut tos: Option<u8> = None;
+    let mut ttl_propagate: Option<RouteMplsTtlPropagation> = None;
+    let mut nhid: Option<u32> = None;
+    let mut ip_proto: Option<u8> = None;
+    let mut sport: Option<u16> = None;
+    let mut dport: Option<u16> = None;
+    let mut flowlabel: Option<u32> = None;
+    let mut pervasive = false;
+    let mut nexthops = Vec::new();
+    let mut encap = None;
     let mut family: Option<AddressFamily> = preferred_family;
     let mut metrics: Vec<RouteMetric> = Vec::new();
     let mut realm: Option<RouteRealm> = None;
@@ -140,6 +210,18 @@ pub(crate) fn parse_route_config(
                 })?;
                 kind = Some(parse_route_type(val)?);
             }
+            "tos" | "dsfield" => {
+                let val = iter.next().ok_or_else(|| {
+                    CliError::from("\"tos\" requires a value")
+                })?;
+                let value = parse_u32_any_base(val)?;
+                if value > u8::MAX as u32 {
+                    return Err(CliError::from(format!(
+                        "invalid tos value: {val}"
+                    )));
+                }
+                tos = Some(value as u8);
+            }
             "metric" | "priority" | "preference" => {
                 let val = iter.next().ok_or_else(|| {
                     CliError::from("\"metric\" requires a value")
@@ -149,13 +231,62 @@ pub(crate) fn parse_route_config(
                 })?);
             }
             "onlink" => onlink = true,
+            "pervasive" => pervasive = true,
+            "ttl-propagate" => {
+                let val = iter.next().ok_or_else(|| {
+                    CliError::from(
+                        "\"ttl-propagate\" requires enabled or disabled",
+                    )
+                })?;
+                ttl_propagate = Some(parse_ttl_propagation(val)?);
+            }
+            "nhid" => {
+                let val = iter.next().ok_or_else(|| {
+                    CliError::from("\"nhid\" requires a value")
+                })?;
+                nhid = Some(parse_u32_any_base(val)?);
+            }
+            "ipproto" => {
+                let val = iter.next().ok_or_else(|| {
+                    CliError::from("\"ipproto\" requires a value")
+                })?;
+                ip_proto = Some(parse_ip_protocol(val)?);
+            }
+            "sport" => {
+                let val = iter.next().ok_or_else(|| {
+                    CliError::from("\"sport\" requires a value")
+                })?;
+                sport = Some(parse_u16_any_base(val, "sport")?);
+            }
+            "dport" => {
+                let val = iter.next().ok_or_else(|| {
+                    CliError::from("\"dport\" requires a value")
+                })?;
+                dport = Some(parse_u16_any_base(val, "dport")?);
+            }
+            "flowlabel" => {
+                let val = iter.next().ok_or_else(|| {
+                    CliError::from("\"flowlabel\" requires a value")
+                })?;
+                flowlabel = Some(parse_u32_any_base(val)?);
+            }
+            "nexthop" => {
+                let (nexthop, nexthop_family) =
+                    parse_route_nexthop(&mut iter, family)?;
+                family = nexthop_family.or(family);
+                nexthops.push(nexthop);
+            }
+            "encap" => {
+                let kind = iter.next().ok_or_else(|| {
+                    CliError::from("\"encap\" requires a type")
+                })?;
+                encap = Some(parse_route_encap(&mut iter, kind)?);
+            }
             "expires" => {
                 let val = iter.next().ok_or_else(|| {
                     CliError::from("\"expires\" requires a value")
                 })?;
-                expires = Some(val.parse::<u32>().map_err(|_| {
-                    CliError::from(format!("invalid expires value: {val}"))
-                })?);
+                expires = Some(parse_time_seconds(val)?);
             }
             "mark" => {
                 let val = iter.next().ok_or_else(|| {
@@ -390,10 +521,449 @@ pub(crate) fn parse_route_config(
         mark,
         uid,
         preference,
+        tos,
+        ttl_propagate,
+        nhid,
+        ip_proto,
+        sport,
+        dport,
+        flowlabel,
+        pervasive,
+        nexthops,
+        encap,
         family,
         metrics,
         realm,
     })
+}
+
+/// Parse one `nexthop` clause until the next route-level option or nexthop.
+fn parse_route_nexthop<'a, I>(
+    iter: &mut std::iter::Peekable<I>,
+    current_family: Option<AddressFamily>,
+) -> Result<(RouteNextHopConfig, Option<AddressFamily>), CliError>
+where
+    I: Iterator<Item = &'a String>,
+{
+    let mut config = RouteNextHopConfig::default();
+    let mut family = current_family;
+
+    while let Some(arg) = iter.peek() {
+        if is_route_level_option(arg) || *arg == "nexthop" {
+            break;
+        }
+        let arg = iter.next().expect("peeked nexthop option");
+        match arg.as_str() {
+            "via" => {
+                let val = iter.next().ok_or_else(|| {
+                    CliError::from("nexthop \"via\" requires an address")
+                })?;
+                let (addr, via_family) = parse_via_address(val, family, iter)?;
+                config.via = Some(addr);
+                family = via_family.or(family).or(addr_to_family(&addr));
+            }
+            "dev" => {
+                config.dev = Some(
+                    iter.next()
+                        .ok_or_else(|| {
+                            CliError::from("nexthop \"dev\" requires a value")
+                        })?
+                        .clone(),
+                );
+            }
+            "weight" => {
+                let val = iter.next().ok_or_else(|| {
+                    CliError::from("nexthop \"weight\" requires a value")
+                })?;
+                let value = parse_u32_any_base(val)?;
+                if !(1..=256).contains(&value) {
+                    return Err(CliError::from(format!(
+                        "nexthop weight must be between 1 and 256: {val}"
+                    )));
+                }
+                config.weight = Some((value - 1) as u8);
+            }
+            "onlink" => config.flags.insert(RouteNextHopFlags::Onlink),
+            "pervasive" => {
+                config.flags.insert(RouteNextHopFlags::Pervasive);
+            }
+            "nhflags" => {
+                let val = iter.next().ok_or_else(|| {
+                    CliError::from("nexthop \"nhflags\" requires a value")
+                })?;
+                config.flags |= parse_nexthop_flags(val)?;
+            }
+            other => {
+                return Err(CliError::from(format!(
+                    "unexpected nexthop option: {other}"
+                )));
+            }
+        }
+    }
+
+    if config.via.is_none() && config.dev.is_none() {
+        return Err(CliError::from(
+            "nexthop requires at least a via address or dev",
+        ));
+    }
+    Ok((config, family))
+}
+
+fn is_route_level_option(arg: &str) -> bool {
+    matches!(
+        arg,
+        "src"
+            | "from"
+            | "to"
+            | "table"
+            | "proto"
+            | "protocol"
+            | "scope"
+            | "type"
+            | "tos"
+            | "dsfield"
+            | "metric"
+            | "priority"
+            | "preference"
+            | "ttl-propagate"
+            | "nhid"
+            | "ipproto"
+            | "sport"
+            | "dport"
+            | "flowlabel"
+            | "expires"
+            | "mark"
+            | "uid"
+            | "pref"
+            | "mtu"
+            | "advmss"
+            | "rtt"
+            | "rttvar"
+            | "reordering"
+            | "window"
+            | "cwnd"
+            | "initcwnd"
+            | "initrwnd"
+            | "ssthresh"
+            | "hoplimit"
+            | "rto_min"
+            | "features"
+            | "quickack"
+            | "congctl"
+            | "fastopen_no_cookie"
+            | "realms"
+            | "encap"
+    )
+}
+
+/// Parse the common, typed subset of `ip route ... encap`.
+fn parse_route_encap<'a, I>(
+    iter: &mut std::iter::Peekable<I>,
+    kind: &str,
+) -> Result<RouteEncapConfig, CliError>
+where
+    I: Iterator<Item = &'a String>,
+{
+    match kind {
+        "mpls" => {
+            let labels = iter.next().ok_or_else(|| {
+                CliError::from("\"encap mpls\" requires a label stack")
+            })?;
+            let labels = parse_mpls_labels(labels)?;
+            let ttl = if iter.peek().is_some_and(|value| *value == "ttl") {
+                iter.next();
+                Some(parse_u8_any_base(
+                    iter.next().ok_or_else(|| {
+                        CliError::from("\"encap mpls ttl\" requires a value")
+                    })?,
+                    "MPLS TTL",
+                )?)
+            } else {
+                None
+            };
+            Ok(RouteEncapConfig::Mpls { labels, ttl })
+        }
+        "seg6" => {
+            let mut mode = Seg6Mode::Encap;
+            let mut segments = None;
+            while let Some(value) = iter.peek() {
+                match value.as_str() {
+                    "mode" => {
+                        iter.next();
+                        let value = iter.next().ok_or_else(|| {
+                            CliError::from(
+                                "\"encap seg6 mode\" requires inline or encap",
+                            )
+                        })?;
+                        mode = match value.as_str() {
+                            "inline" => Seg6Mode::Inline,
+                            "encap" => Seg6Mode::Encap,
+                            value => {
+                                return Err(CliError::from(format!(
+                                    "invalid seg6 mode: {value}"
+                                )));
+                            }
+                        };
+                    }
+                    "segs" | "segments" => {
+                        iter.next();
+                        let value = iter.next().ok_or_else(|| {
+                            CliError::from(
+                                "\"encap seg6 segs\" requires IPv6 segments",
+                            )
+                        })?;
+                        segments = Some(parse_ipv6_segments(value)?);
+                    }
+                    _ => break,
+                }
+            }
+            let segments = segments.ok_or_else(|| {
+                CliError::from("\"encap seg6\" requires a segs list")
+            })?;
+            Ok(RouteEncapConfig::Seg6 { mode, segments })
+        }
+        "ip6" => {
+            let mut id = None;
+            let mut destination = None;
+            let mut source = None;
+            let mut hoplimit = None;
+            let mut traffic_class = None;
+            let mut flags = 0u16;
+            while let Some(value) = iter.peek() {
+                match value.as_str() {
+                    "id" => {
+                        iter.next();
+                        id = Some(parse_u64_any_base(
+                            iter.next().ok_or_else(|| {
+                                CliError::from(
+                                    "\"encap ip6 id\" requires a value",
+                                )
+                            })?,
+                        )?);
+                    }
+                    "dst" | "destination" => {
+                        iter.next();
+                        destination = Some(parse_ipv6_encap_address(
+                            iter.next().ok_or_else(|| {
+                                CliError::from(
+                                    "\"encap ip6 dst\" requires an address",
+                                )
+                            })?,
+                            "destination",
+                        )?);
+                    }
+                    "src" | "source" => {
+                        iter.next();
+                        source = Some(parse_ipv6_encap_address(
+                            iter.next().ok_or_else(|| {
+                                CliError::from(
+                                    "\"encap ip6 src\" requires an address",
+                                )
+                            })?,
+                            "source",
+                        )?);
+                    }
+                    "hoplimit" | "hlim" => {
+                        iter.next();
+                        hoplimit = Some(parse_u8_any_base(
+                            iter.next().ok_or_else(|| {
+                                CliError::from(
+                                    "\"encap ip6 hoplimit\" requires a value",
+                                )
+                            })?,
+                            "IPv6 hoplimit",
+                        )?);
+                    }
+                    "tc" => {
+                        iter.next();
+                        traffic_class = Some(parse_u8_any_base(
+                            iter.next().ok_or_else(|| {
+                                CliError::from(
+                                    "\"encap ip6 tc\" requires a value",
+                                )
+                            })?,
+                            "IPv6 traffic class",
+                        )?);
+                    }
+                    "key" => {
+                        iter.next();
+                        flags |= 1 << 2;
+                    }
+                    "csum" => {
+                        iter.next();
+                        flags |= 1;
+                    }
+                    "seq" => {
+                        iter.next();
+                        flags |= 1 << 3;
+                    }
+                    _ => break,
+                }
+            }
+            if destination.is_none() && source.is_none() && id.is_none() {
+                return Err(CliError::from(
+                    "\"encap ip6\" requires id, dst, or src",
+                ));
+            }
+            Ok(RouteEncapConfig::Ip6 {
+                id,
+                destination,
+                source,
+                hoplimit,
+                traffic_class,
+                flags,
+            })
+        }
+        other => Err(CliError::from(format!(
+            "route encapsulation '{other}' is not supported yet; supported types are mpls, seg6, and ip6"
+        ))),
+    }
+}
+
+fn parse_mpls_labels(value: &str) -> Result<Vec<MplsLabel>, CliError> {
+    let parts = value.split(['/', ',']).collect::<Vec<_>>();
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        return Err(CliError::from(format!(
+            "invalid MPLS label stack: {value}"
+        )));
+    }
+    parts
+        .iter()
+        .enumerate()
+        .map(|(index, part)| {
+            let fields = part.split(':').collect::<Vec<_>>();
+            let label = parse_u32_any_base(fields[0])?;
+            if label > 0xF_FFFF {
+                return Err(CliError::from(format!(
+                    "MPLS label is out of range: {label}"
+                )));
+            }
+            let traffic_class = fields
+                .get(1)
+                .map(|value| parse_u8_any_base(value, "MPLS traffic class"))
+                .transpose()?
+                .unwrap_or(0);
+            if traffic_class > 7 {
+                return Err(CliError::from(format!(
+                    "MPLS traffic class is out of range: {traffic_class}"
+                )));
+            }
+            let bottom_of_stack =
+                fields.get(2).map_or(index + 1 == parts.len(), |value| {
+                    matches!(*value, "1" | "yes" | "true" | "S" | "s")
+                });
+            let ttl = fields
+                .get(3)
+                .map(|value| parse_u8_any_base(value, "MPLS TTL"))
+                .transpose()?
+                .unwrap_or(0);
+            Ok(MplsLabel {
+                label,
+                traffic_class,
+                bottom_of_stack,
+                ttl,
+            })
+        })
+        .collect()
+}
+
+fn parse_ipv6_segments(value: &str) -> Result<Vec<Ipv6Addr>, CliError> {
+    value
+        .split(',')
+        .map(|segment| {
+            segment.parse::<Ipv6Addr>().map_err(|_| {
+                CliError::from(format!("invalid IPv6 segment: {segment}"))
+            })
+        })
+        .collect()
+}
+
+fn parse_ipv6_encap_address(
+    value: &str,
+    name: &str,
+) -> Result<Ipv6Addr, CliError> {
+    value.parse::<Ipv6Addr>().map_err(|_| {
+        CliError::from(format!("invalid IPv6 {name} address: {value}"))
+    })
+}
+
+fn parse_u8_any_base(value: &str, name: &str) -> Result<u8, CliError> {
+    let number = parse_u32_any_base(value)?;
+    u8::try_from(number)
+        .map_err(|_| CliError::from(format!("invalid {name}: {value}")))
+}
+
+fn parse_u64_any_base(value: &str) -> Result<u64, CliError> {
+    let (radix, digits) = if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        (16, hex)
+    } else if value.len() > 1 && value.starts_with('0') {
+        (8, &value[1..])
+    } else {
+        (10, value)
+    };
+    u64::from_str_radix(digits, radix)
+        .map_err(|_| CliError::from(format!("invalid number: {value}")))
+}
+
+fn parse_ttl_propagation(
+    value: &str,
+) -> Result<RouteMplsTtlPropagation, CliError> {
+    match value {
+        "enabled" | "enable" | "on" | "1" => {
+            Ok(RouteMplsTtlPropagation::Enabled)
+        }
+        "disabled" | "disable" | "off" | "0" => {
+            Ok(RouteMplsTtlPropagation::Disabled)
+        }
+        "default" => Ok(RouteMplsTtlPropagation::Default),
+        _ => Err(CliError::from(format!(
+            "invalid ttl-propagate value: {value}"
+        ))),
+    }
+}
+
+fn parse_nexthop_flags(value: &str) -> Result<RouteNextHopFlags, CliError> {
+    let mut flags = RouteNextHopFlags::empty();
+    for flag in value.split([',', '/']) {
+        let bit = match flag {
+            "dead" => RouteNextHopFlags::Dead,
+            "pervasive" => RouteNextHopFlags::Pervasive,
+            "onlink" => RouteNextHopFlags::Onlink,
+            "offload" => RouteNextHopFlags::Offload,
+            "linkdown" => RouteNextHopFlags::Linkdown,
+            "unresolved" => RouteNextHopFlags::Unresolved,
+            "trap" => RouteNextHopFlags::Trap,
+            _ => {
+                return Err(CliError::from(format!(
+                    "invalid nexthop flag: {flag}"
+                )));
+            }
+        };
+        flags.insert(bit);
+    }
+    Ok(flags)
+}
+
+fn parse_ip_protocol(value: &str) -> Result<u8, CliError> {
+    match value.to_ascii_lowercase().as_str() {
+        "tcp" => Ok(6),
+        "udp" => Ok(17),
+        "sctp" => Ok(132),
+        "icmp" => Ok(1),
+        "icmpv6" => Ok(58),
+        _ => value.parse::<u8>().map_err(|_| {
+            CliError::from(format!("invalid ipproto value: {value}"))
+        }),
+    }
+}
+
+fn parse_u16_any_base(value: &str, name: &str) -> Result<u16, CliError> {
+    let parsed = parse_u32_any_base(value)?;
+    u16::try_from(parsed)
+        .map_err(|_| CliError::from(format!("invalid {name} value: {value}")))
 }
 
 fn parse_u32_any_base(s: &str) -> Result<u32, CliError> {
@@ -449,6 +1019,66 @@ fn parse_time_rtt(s: &str) -> Result<(u32, bool), CliError> {
         return Err(CliError::from(format!("invalid time value: {s}")));
     }
     Ok((value.ceil() as u32, !has_suffix))
+}
+
+/// Parse a route lifetime into the kernel's integer-second representation.
+///
+/// `ip route` accepts a bare number of seconds as well as common suffixes.
+/// Fractional values are rounded up so a non-zero lifetime is not silently
+/// turned into an immediately expired route.
+fn parse_time_seconds(s: &str) -> Result<u32, CliError> {
+    let lower = s.to_ascii_lowercase();
+    let (num, multiplier) = if let Some(num) = lower.strip_suffix("msecs") {
+        (num, 0.001)
+    } else if let Some(num) = lower.strip_suffix("msec") {
+        (num, 0.001)
+    } else if let Some(num) = lower.strip_suffix("ms") {
+        (num, 0.001)
+    } else if let Some(num) = lower.strip_suffix("minutes") {
+        (num, 60.0)
+    } else if let Some(num) = lower.strip_suffix("minute") {
+        (num, 60.0)
+    } else if let Some(num) = lower.strip_suffix("mins") {
+        (num, 60.0)
+    } else if let Some(num) = lower.strip_suffix("min") {
+        (num, 60.0)
+    } else if let Some(num) = lower.strip_suffix("hours") {
+        (num, 3600.0)
+    } else if let Some(num) = lower.strip_suffix("hour") {
+        (num, 3600.0)
+    } else if let Some(num) = lower.strip_suffix('h') {
+        (num, 3600.0)
+    } else if let Some(num) = lower.strip_suffix("days") {
+        (num, 86_400.0)
+    } else if let Some(num) = lower.strip_suffix("day") {
+        (num, 86_400.0)
+    } else if let Some(num) = lower.strip_suffix('d') {
+        (num, 86_400.0)
+    } else if let Some(num) = lower.strip_suffix("secs") {
+        (num, 1.0)
+    } else if let Some(num) = lower.strip_suffix("sec") {
+        (num, 1.0)
+    } else if let Some(num) = lower.strip_suffix('s') {
+        (num, 1.0)
+    } else {
+        (lower.as_str(), 1.0)
+    };
+
+    if num.is_empty() {
+        return Err(CliError::from(format!("invalid expires value: {s}")));
+    }
+    let value = if num.contains('.') {
+        num.parse::<f64>().map_err(|_| {
+            CliError::from(format!("invalid expires value: {s}"))
+        })? * multiplier
+    } else {
+        parse_u32_any_base(num)? as f64 * multiplier
+    };
+    if value.is_sign_negative() || !value.is_finite() || value > u32::MAX as f64
+    {
+        return Err(CliError::from(format!("invalid expires value: {s}")));
+    }
+    Ok(value.ceil() as u32)
 }
 
 fn parse_realm(s: &str) -> Result<RouteRealm, CliError> {
@@ -757,6 +1387,135 @@ mod tests {
                 RouteMetric::RtoMin(200),
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_route_expiration_suffixes() {
+        assert_eq!(parse_time_seconds("300").unwrap(), 300);
+        assert_eq!(parse_time_seconds("300s").unwrap(), 300);
+        assert_eq!(parse_time_seconds("1.5s").unwrap(), 2);
+        assert_eq!(parse_time_seconds("2min").unwrap(), 120);
+        assert_eq!(parse_time_seconds("500ms").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_parse_route_multipath_and_flow_selectors() {
+        let config = parse_route_config(
+            &opts(&[
+                "203.0.113.0/24",
+                "tos",
+                "0x10",
+                "ipproto",
+                "tcp",
+                "sport",
+                "0x1234",
+                "dport",
+                "443",
+                "flowlabel",
+                "0xabc",
+                "pervasive",
+                "nexthop",
+                "via",
+                "192.0.2.1",
+                "dev",
+                "eth0",
+                "weight",
+                "1",
+                "onlink",
+                "nexthop",
+                "dev",
+                "eth1",
+                "weight",
+                "2",
+                "nhflags",
+                "pervasive",
+            ]),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(config.tos, Some(0x10));
+        assert_eq!(config.ip_proto, Some(6));
+        assert_eq!(config.sport, Some(0x1234));
+        assert_eq!(config.dport, Some(443));
+        assert_eq!(config.flowlabel, Some(0xabc));
+        assert!(config.pervasive);
+        assert_eq!(config.nexthops.len(), 2);
+        assert_eq!(config.nexthops[0].weight, Some(0));
+        assert!(config.nexthops[0].flags.contains(RouteNextHopFlags::Onlink));
+        assert_eq!(config.nexthops[1].weight, Some(1));
+        assert!(
+            config.nexthops[1]
+                .flags
+                .contains(RouteNextHopFlags::Pervasive)
+        );
+
+        let message =
+            super::super::modify::build_route_message(&config).unwrap();
+        assert!(
+            message.header.flags.contains(
+                rtnetlink::packet_route::route::RouteFlags::Pervasive
+            )
+        );
+        assert!(message.attributes.iter().any(|attribute| matches!(
+            attribute,
+            RouteAttribute::MultiPath(next_hops) if next_hops.len() == 2
+        )));
+    }
+
+    #[test]
+    fn test_parse_route_encapsulation_forms() {
+        let config = parse_route_config(
+            &opts(&[
+                "10.0.0.0/8",
+                "encap",
+                "mpls",
+                "100:2:0:64/200",
+                "ttl",
+                "32",
+                "dev",
+                "eth0",
+            ]),
+            None,
+        )
+        .unwrap();
+        let Some(RouteEncapConfig::Mpls { labels, ttl }) = config.encap else {
+            panic!("expected MPLS encapsulation");
+        };
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0].label, 100);
+        assert!(!labels[0].bottom_of_stack);
+        assert!(labels[1].bottom_of_stack);
+        assert_eq!(ttl, Some(32));
+
+        let config = parse_route_config(
+            &opts(&[
+                "2001:db8::/64",
+                "encap",
+                "seg6",
+                "mode",
+                "inline",
+                "segs",
+                "2001:db8::1,2001:db8::2",
+            ]),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            config.encap.as_ref(),
+            Some(RouteEncapConfig::Seg6 {
+                mode: Seg6Mode::Inline,
+                segments
+            }) if segments.len() == 2
+        ));
+        let message =
+            super::super::modify::build_route_message(&config).unwrap();
+        assert!(message.attributes.iter().any(|attribute| matches!(
+            attribute,
+            RouteAttribute::EncapType(
+                rtnetlink::packet_route::route::RouteLwEnCapType::Seg6
+            )
+        )));
     }
 
     #[test]

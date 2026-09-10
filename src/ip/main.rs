@@ -1,16 +1,36 @@
 // SPDX-License-Identifier: MIT
 
+//! Standalone `ip-rs` command-line entry point.
+//!
+//! The command deliberately keeps the process-oriented behavior of an `ip`
+//! executable—Clap parsing, text/JSON/YAML rendering, and exit status—at the
+//! edge.  The object modules below turn the parsed arguments into typed
+//! route-netlink messages.
+
 mod address;
+mod bridge;
 mod link;
+mod monitor;
 mod neighbour;
+mod netns;
+mod ntable;
 mod route;
+mod rule;
+mod stats;
+mod token;
+mod vrf;
 
 use std::io::IsTerminal;
 
 use iproute_rs::{CliColor, CliError, OutputFormat, print_result_and_exit};
 use rtnetlink::packet_route::AddressFamily;
 
-use self::{address::AddressCommand, link::LinkCommand, route::RouteCommand};
+use self::{
+    address::AddressCommand, bridge::BridgeCommand, link::LinkCommand,
+    monitor::MonitorCommand, netns::NetnsCommand, ntable::NTableCommand,
+    route::RouteCommand, rule::RuleCommand, stats::StatsCommand,
+    token::TokenCommand, vrf::VrfCommand,
+};
 use crate::neighbour::NeighbourCommand;
 
 pub(crate) fn resolve_preferred_family(
@@ -137,6 +157,7 @@ async fn main() -> Result<(), CliError> {
         )
         .arg(
             clap::Arg::new("BRIEF")
+                .short('b')
                 .long("brief")
                 .visible_alias("br")
                 .help("Brief output")
@@ -197,9 +218,17 @@ async fn main() -> Result<(), CliError> {
         )
         .subcommand_required(true)
         .subcommand(LinkCommand::gen_command())
+        .subcommand(MonitorCommand::gen_command())
+        .subcommand(NetnsCommand::gen_command())
+        .subcommand(BridgeCommand::gen_command())
         .subcommand(AddressCommand::gen_command())
         .subcommand(NeighbourCommand::gen_command())
-        .subcommand(RouteCommand::gen_command());
+        .subcommand(NTableCommand::gen_command())
+        .subcommand(RouteCommand::gen_command())
+        .subcommand(RuleCommand::gen_command())
+        .subcommand(StatsCommand::gen_command())
+        .subcommand(TokenCommand::gen_command())
+        .subcommand(VrfCommand::gen_command());
 
     let matches = app.get_matches_mut();
 
@@ -218,10 +247,26 @@ async fn main() -> Result<(), CliError> {
         CliColor::enable();
     }
 
+    if !matches.get_flag("VERSION")
+        && let Some(selector) = matches.get_one::<String>("NETNS")
+    {
+        netns::enter_named_namespace(selector)?;
+    }
+
     if matches.get_flag("VERSION") {
         print_result_and_exit(Ok(app.render_version().to_string()), fmt);
     } else if let Some(matches) = matches.subcommand_matches(LinkCommand::CMD) {
         print_result_and_exit(LinkCommand::handle(matches).await, fmt);
+    } else if let Some(matches) = matches.subcommand_matches(BridgeCommand::CMD)
+    {
+        print_result_and_exit(BridgeCommand::handle(matches).await, fmt);
+    } else if let Some(matches) =
+        matches.subcommand_matches(MonitorCommand::CMD)
+    {
+        print_result_and_exit(MonitorCommand::handle(matches).await, fmt);
+    } else if let Some(matches) = matches.subcommand_matches(NetnsCommand::CMD)
+    {
+        print_result_and_exit(NetnsCommand::handle(matches).await, fmt);
     } else if let Some(matches) =
         matches.subcommand_matches(AddressCommand::CMD)
     {
@@ -234,6 +279,13 @@ async fn main() -> Result<(), CliError> {
         matches.subcommand_matches(NeighbourCommand::CMD)
     {
         print_result_and_exit(NeighbourCommand::handle(matches).await, fmt);
+    } else if let Some(matches) = matches.subcommand_matches(NTableCommand::CMD)
+    {
+        print_result_and_exit(
+            NTableCommand::handle(matches, resolve_preferred_family(matches))
+                .await,
+            fmt,
+        );
     } else if let Some(matches) = matches.subcommand_matches(RouteCommand::CMD)
     {
         let preferred_family = resolve_preferred_family(matches);
@@ -241,6 +293,20 @@ async fn main() -> Result<(), CliError> {
             RouteCommand::handle(matches, preferred_family).await,
             fmt,
         );
+    } else if let Some(matches) = matches.subcommand_matches(RuleCommand::CMD) {
+        print_result_and_exit(
+            RuleCommand::handle(matches, resolve_preferred_family(matches))
+                .await,
+            fmt,
+        );
+    } else if let Some(matches) = matches.subcommand_matches(StatsCommand::CMD)
+    {
+        print_result_and_exit(StatsCommand::handle(matches).await, fmt);
+    } else if let Some(matches) = matches.subcommand_matches(TokenCommand::CMD)
+    {
+        print_result_and_exit(TokenCommand::handle(matches).await, fmt);
+    } else if let Some(matches) = matches.subcommand_matches(VrfCommand::CMD) {
+        print_result_and_exit(VrfCommand::handle(matches).await, fmt);
     } else {
         app.print_help()?;
         println!();

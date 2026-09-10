@@ -757,6 +757,11 @@ fn apply_bridge_args<'a>(
     iter: &mut impl Iterator<Item = &'a str>,
 ) -> Result<LinkMessageBuilder<LinkBridge>, CliError> {
     while let Some(key) = iter.next() {
+        if key == "fdb_flush" {
+            builder = builder.append_info_data(InfoBridge::FdbFlush);
+            continue;
+        }
+
         let Some(v) = iter.next() else {
             return Err(CliError::from(format!(
                 "bridge {key} requires a value"
@@ -835,6 +840,14 @@ fn apply_bridge_args<'a>(
             "mcast_hash_max" => {
                 builder =
                     builder.mcast_hash_max(parse_u32(v, "mcast_hash_max")?);
+            }
+            "mcast_hash_elasticity" => {
+                builder = builder.append_info_data(
+                    InfoBridge::MulticastHashElasticity(parse_u32(
+                        v,
+                        "mcast_hash_elasticity",
+                    )?),
+                );
             }
             "mcast_last_member_count" => {
                 builder = builder.mcast_last_member_count(parse_u32(
@@ -947,6 +960,11 @@ fn apply_bridge_port_args(
 ) -> Result<Vec<LinkInfo>, CliError> {
     let mut port_data: Vec<InfoBridgePort> = Vec::new();
     while let Some(key) = iter.next() {
+        if key.as_ref() == "fdb_flush" {
+            port_data.push(InfoBridgePort::Flush);
+            continue;
+        }
+
         let Some(v) = iter.next() else {
             return Err(CliError::from(format!(
                 "bridge port {} requires a value",
@@ -954,9 +972,6 @@ fn apply_bridge_port_args(
             )));
         };
         match key.as_ref() {
-            "fdb_flush" => {
-                port_data.push(InfoBridgePort::Flush);
-            }
             "state" => {
                 let state =
                     v.as_ref().parse::<BridgePortState>().map_err(|e| {

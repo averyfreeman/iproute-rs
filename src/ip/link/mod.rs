@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 
+//! Network-link inventory, mutation, per-type attributes, statistics, and XDP.
+
 mod add;
 mod afstats;
 mod cli;
 mod delete;
 mod detail;
-mod flags;
+pub(crate) mod flags;
 mod ifaces;
 mod link_info;
 mod property;

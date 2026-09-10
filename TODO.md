@@ -1,41 +1,44 @@
-# TODO
+# Remaining work
+
+The high-value route-netlink surface is implemented. This file intentionally
+contains only follow-up work; the complete implemented/deferred matrix is in
+[`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md).
 
 ## `ip route`
 
-- add/del/change/replace/append/prepend: support multipath (`nexthop ...`,
-  `weight`), `nhid ID`, and the `pervasive` next-hop flag —
-  `src/ip/route/add.rs`, `src/ip/route/modify.rs`
-- add/del/change/replace/append/prepend: support `tos TOS` and
-  `ttl-propagate` in NODE_SPEC
-- add/del/change/replace/append/prepend: support `encap`
-  (`mpls | ip | ip6 | seg6 | seg6local | rpl | ioam6 | xfrm`)
-- add/del/change/replace/append/prepend: accept TIME values with `s`/`ms`
-  suffix (e.g. `expires 300s`)
-- get: support `vrf NAME` and `as ADDRESS` — `src/ip/route/get.rs`
-- show/flush selectors: support `root PREFIX`, `match PREFIX`,
-  `exact PREFIX`, and `vrf NAME` — `src/ip/route/show.rs`
-  (`RouteShowFilter::parse`)
-- show: display metrics, `expires`, `nhid`, `encap`, `realms`,
-  `ipproto`/`sport`/`dport`/`flowlabel`; populate `ttl_propagate` from the
-  dump — `src/ip/route/show.rs` (`parse_nl_msg_to_route`)
-- tests: add coverage for the above (`tests/ip_route*.rs`)
-- MPLS support
+- Decode lightweight-tunnel attributes into structured output instead of the
+  current lossless debug representation.
+- Add `seg6local`, `ioam6`, `xfrm`, `rpl`, `ila`, and richer `ip`/`ip6`
+  encapsulation forms when `netlink-packet-route` exposes stable public types.
+- Add the separate `ip nexthop` object family and resolve its interaction with
+  route `nhid` references.
+- Expand save/restore fidelity tests for all route metrics, MPLS labels, and
+  nested multipath attributes.
 
-## `ip link`
+## `ip link` and XDP
 
-- show: implement `-o`/`--oneline` output — `src/ip/link/show.rs` (also
-  applies to address/neighbour/route show)
-- show: implement `-s`/`--stats` RX/TX statistics output —
-  `src/ip/link/show.rs`
-- add/set: audit per-type options against `ip link add type <TYPE> help`
-  (candidates: vxlan, bond, bridge)
+- Audit every per-device option against the newest kernel and iproute2 help
+  text, especially driver-specific bond, VXLAN, MACsec, WireGuard, and
+  tunnel attributes.
+- Add structured output for more driver-specific `xstats` and `afstats`
+  groups.
+- Add relocation/CO-RE fixtures to the libbpf loader tests; the raw ELF
+  fallback is intentionally only a compatibility path.
 
-## `ip address`
+## `ip address`, `ip monitor`, and VRF
 
-- show: implement `-o`/`--oneline` output — `src/ip/address/show.rs`
-- show: implement `-s`/`--stats` RX/TX statistics output —
-  `src/ip/address/show.rs`
-- show: accept the `-br` short flag (brief output works via `--brief`, but
-  `-br` is rejected by clap) — `src/ip/main.rs`
-- show: format unknown numeric address protocols like iproute2 (`proto 0x63`,
-  not `proto 99`) — `src/ip/address/show.rs`
+- Add address-statistics records instead of relying only on the associated
+  link record for `ip address -s`.
+- Add structured monitor filtering and JSON event records; the current stream
+  preserves unknown kernel attributes by printing the parsed netlink debug
+  value.
+- Implement `ip vrf exec` with cgroup v2 hierarchy management and a
+  `BPF_CGROUP_INET_SOCK_CREATE` program. This is a privileged cgroup-BPF
+  feature rather than a route-netlink operation.
+
+## Deferred protocol families
+
+The full traffic-control (`ip/tc`), XFRM, MPTCP, generic-netlink nexthop,
+address-label, multicast-address, netconf, FOU, L2TP, ILA, MACsec policy, and
+multicast-route families remain outside the current crate. See the status
+document for the reason each group is deferred.

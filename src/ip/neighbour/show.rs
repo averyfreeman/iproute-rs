@@ -358,6 +358,18 @@ async fn get_links(
     Ok((link_names, link_indicies))
 }
 
+/// Resolve a user-facing interface name to its kernel ifindex.
+pub(crate) async fn resolve_link_index(
+    handle: &Handle,
+    device: &str,
+) -> Result<u32, CliError> {
+    let (_, indices) = get_links(handle, Some(device)).await?;
+    indices
+        .get(device)
+        .copied()
+        .ok_or_else(|| format!("Cannot find device \"{device}\"").into())
+}
+
 pub(crate) async fn handle_show(
     opts: impl Iterator<Item = &str>,
     show_statistics: bool,
@@ -462,4 +474,98 @@ pub(crate) async fn handle_show(
     }
 
     Ok(neighbour_info)
+}
+
+/// Remove neighbour entries matching the same selectors accepted by
+/// [`handle_show`].  `ip neigh flush` is intentionally implemented as a
+/// dump-then-delete pass because the kernel exposes neighbour filtering only
+/// for a subset of the user-facing selectors.
+pub(crate) async fn handle_flush(
+    opts: impl Iterator<Item = &str>,
+    show_statistics: bool,
+) -> Result<(), CliError> {
+    let (connection, handle, _) = rtnetlink::new_connection()?;
+    tokio::spawn(connection);
+
+    let args = ShowArguments::from_arguments(opts)?;
+    let (link_names, link_indices) =
+        get_links(&handle, args.dev_filter).await?;
+
+    let controller_filter = match args.controller_filter {
+        ControllerFilter::DeviceName(vrf_name) => {
+            let index = link_indices.get(vrf_name).ok_or_else(|| {
+                format!(
+                    "argument \"{vrf_name}\" is wrong: Not a valid VRF name"
+                )
+            })?;
+            Some(*index)
+        }
+        ControllerFilter::NoController => Some(u32::MAX),
+        ControllerFilter::Unfiltered => None,
+    };
+
+    let mut neighbours_get_handle = handle.neighbours().get();
+    if args.proxy {
+        neighbours_get_handle = neighbours_get_handle.proxies();
+    }
+    if let Some(dev_name) = args.dev_filter {
+        let dev_index = link_indices
+            .get(dev_name)
+            .ok_or_else(|| format!("Cannot find device \"{dev_name}\""))?;
+        neighbours_get_handle
+            .message_mut()
+            .attributes
+            .push(NeighbourAttribute::IfIndex(*dev_index));
+    }
+    neighbours_get_handle
+        .message_mut()
+        .attributes
+        .extend(controller_filter.map(NeighbourAttribute::Controller));
+
+    let clock = nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK)
+        .unwrap_or(None)
+        .unwrap_or(100) as u32;
+    let mut neighbours = neighbours_get_handle.execute();
+    let mut to_delete = Vec::new();
+
+    while let Some(nl_msg) = neighbours.try_next().await? {
+        let state_matches = match args.nud_filter {
+            NudFilter::Default => {
+                nl_msg.header.state != NeighbourState::None
+                    && nl_msg.header.state != NeighbourState::Noarp
+            }
+            NudFilter::Specified(state) => nl_msg.header.state == state,
+            NudFilter::All => true,
+        };
+        if !state_matches {
+            continue;
+        }
+
+        let Some(neigh) =
+            parse_nl_msg_to_neighbour(nl_msg.clone(), &link_names, clock)?
+        else {
+            continue;
+        };
+        if let Some(address_filter) = args.address_filter
+            && neigh.dst != address_filter
+        {
+            continue;
+        }
+        if args.unused && neigh.refcnt.unwrap_or(0) != 0 {
+            continue;
+        }
+        to_delete.push(nl_msg);
+    }
+
+    let count = to_delete.len();
+    for message in to_delete {
+        handle.neighbours().del(message).execute().await?;
+    }
+    if show_statistics {
+        eprintln!(
+            "Flushed {count} neighbour entr{}.",
+            if count == 1 { "y" } else { "ies" }
+        );
+    }
+    Ok(())
 }
