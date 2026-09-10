@@ -18,6 +18,8 @@ See [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) for the command
 coverage matrix, remaining gaps, blockers, and the validation commands used
 for this release.
 
+For a visual command map, see [`overview.md`](overview.md).
+
 ## Examples
 
 ```sh
