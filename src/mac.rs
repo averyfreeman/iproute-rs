@@ -4,6 +4,7 @@ use std::fmt::Write;
 
 use crate::CliError;
 
+/// Performs the public `mac_to_string` operation.
 pub fn mac_to_string(data: &[u8]) -> String {
     if data.len() == 4 {
         let mut arr = [0u8; 4];
@@ -25,6 +26,7 @@ pub fn mac_to_string(data: &[u8]) -> String {
     rt
 }
 
+/// Performs the public `parse_mac_str` operation.
 pub fn parse_mac_str(s: &str) -> Result<Vec<u8>, CliError> {
     let mut bytes = Vec::new();
     for byte in s.split(':') {

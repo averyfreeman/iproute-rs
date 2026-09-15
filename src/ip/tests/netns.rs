@@ -5,18 +5,21 @@ use std::{
     process::Command,
 };
 
+/// Describes the public `CmdOutput` type.
 pub struct CmdOutput {
     #[allow(dead_code)]
     pub stdout: String,
     pub stderr: String,
 }
 
+/// Describes the public `Outputs` type.
 pub struct Outputs {
     #[allow(dead_code)]
     pub expected: String,
     pub actual: String,
 }
 
+/// Describes the public `NetnsGuard` type.
 pub struct NetnsGuard {
     pub name: String,
 }
@@ -43,12 +46,14 @@ impl NetnsGuard {
         Self { name }
     }
 
+    /// Performs the public `exec_cmd` operation.
     pub fn exec_cmd(&self, args: &[&str]) -> String {
         let raw = self.exec_cmd_raw(args);
         String::from_utf8(raw)
             .expect("Failed to convert command output to String")
     }
 
+    /// Performs the public `exec_cmd_raw` operation.
     pub fn exec_cmd_raw(&self, args: &[&str]) -> Vec<u8> {
         let mut full_args = vec!["netns", "exec", &self.name];
         full_args.extend_from_slice(args);
@@ -67,12 +72,14 @@ impl NetnsGuard {
         output.stdout
     }
 
+    /// Performs the public `ip_rs_exec_cmd` operation.
     pub fn ip_rs_exec_cmd(&self, args: &[&str]) -> String {
         let raw = self.ip_rs_exec_cmd_raw(args);
         String::from_utf8(raw)
             .expect("Failed to convert command output to String")
     }
 
+    /// Performs the public `ip_rs_exec_cmd_raw` operation.
     pub fn ip_rs_exec_cmd_raw(&self, args: &[&str]) -> Vec<u8> {
         let ip_rs_path = std::env!("CARGO_BIN_EXE_ip-rs");
 
@@ -95,6 +102,7 @@ impl NetnsGuard {
         output.stdout
     }
 
+    /// Performs the public `ip_rs_exec_cmd_with_stdin` operation.
     pub fn ip_rs_exec_cmd_with_stdin(
         &self,
         args: &[&str],
@@ -136,6 +144,7 @@ impl NetnsGuard {
             .expect("Failed to convert command output to String")
     }
 
+    /// Performs the public `ip_rs_exec_cmd_with_stderr` operation.
     pub fn ip_rs_exec_cmd_with_stderr(&self, args: &[&str]) -> CmdOutput {
         let ip_rs_path = std::env!("CARGO_BIN_EXE_ip-rs");
 
@@ -163,6 +172,7 @@ impl NetnsGuard {
         }
     }
 
+    /// Performs the public `assert_alias_output` operation.
     pub fn assert_alias_output(
         &self,
         expected_args: &[&str],
@@ -173,6 +183,7 @@ impl NetnsGuard {
         pretty_assertions::assert_eq!(expected_output, our_output);
     }
 
+    /// Performs the public `assert_eq_output_map` operation.
     pub fn assert_eq_output_map(
         &self,
         args: &[&str],
@@ -192,6 +203,7 @@ impl NetnsGuard {
         }
     }
 
+    /// Performs the public `assert_eq_output` operation.
     pub fn assert_eq_output(&self, args: &[&str]) -> Outputs {
         self.assert_eq_output_map(args, std::convert::identity)
     }

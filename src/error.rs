@@ -3,6 +3,7 @@
 const DEFAULT_ERROR_CODE: i32 = 1;
 
 #[derive(Debug, Default)]
+/// Describes the public `CliError` type.
 pub struct CliError {
     pub code: i32,
     pub msg: String,
