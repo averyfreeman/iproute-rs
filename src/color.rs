@@ -21,6 +21,7 @@ const COLOR_BOLD_MAGENTA: &str = "\x1b[1;35m";
 const COLOR_BOLD_CYAN: &str = "\x1b[1;36m";
 
 #[derive(Clone, Copy, Debug)]
+/// Describes the public `CliColor` type.
 pub enum CliColor {
     IfaceName,
     Mac,
@@ -62,6 +63,7 @@ impl std::fmt::Display for CliColor {
 }
 
 impl CliColor {
+    /// Performs the public `enable` operation.
     pub fn enable() {
         IS_COLOR_ENABLED.get_or_init(|| true);
     }
@@ -88,6 +90,7 @@ impl CliColor {
         })
     }
 
+    /// Performs the public `address_color` operation.
     pub fn address_color(family: &str) -> Self {
         match family {
             "inet" => Self::Ipv4Addr,

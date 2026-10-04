@@ -4,6 +4,7 @@ use std::io::Write;
 
 use crate::CliError;
 
+/// Describes the public `CanDisplay` type.
 pub trait CanDisplay: serde::Serialize + Sized {
     fn gen_string(&self) -> String;
 
@@ -41,6 +42,7 @@ impl CanDisplay for String {
     }
 }
 
+/// Describes the public `CanOutput` type.
 pub trait CanOutput: serde::Serialize + CanDisplay + Sized {
     fn to_cli_string(&self) -> String {
         self.gen_string()
@@ -52,6 +54,7 @@ impl CanOutput for String {}
 impl<T> CanOutput for &[T] where T: CanOutput + std::fmt::Display {}
 impl<T> CanOutput for Vec<T> where T: CanOutput + std::fmt::Display {}
 
+/// Performs the public `print_result_and_exit` operation.
 pub fn print_result_and_exit<T>(result: Result<T, CliError>, fmt: OutputFormat)
 where
     T: CanOutput,
@@ -78,6 +81,7 @@ where
 }
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Describes the public `OutputFormat` type.
 pub enum OutputFormat {
     #[default]
     Cli,

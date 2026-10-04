@@ -68,6 +68,7 @@ pub(crate) struct CliLinkInfoDetail {
 }
 
 impl CliLinkInfoDetail {
+    /// Performs the public `new` operation.
     pub fn new(nl_attrs: &[LinkAttribute]) -> Self {
         let mut linkinfo = None;
         let mut promiscuity = 0;
@@ -152,6 +153,7 @@ impl CliLinkInfoDetail {
         }
     }
 
+    /// Performs the public `remove_inet6_addr_gen_mode` operation.
     pub fn remove_inet6_addr_gen_mode(&mut self) {
         self.inet6_addr_gen_mode = String::new();
     }

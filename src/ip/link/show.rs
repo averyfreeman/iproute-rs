@@ -217,12 +217,14 @@ impl CliLinkInfo {
 
     // For `ip address show`, we want to remove some details that are not
     // present in the original ip command.
+    /// Performs the public `show_only_addr_details` operation.
     pub fn show_only_addr_details(&mut self) {
         self.initialize_addr_info();
         self.remove_link_mode();
         self.remove_inet6_addr_gen_mode();
     }
 
+    /// Performs the public `set_brief` operation.
     pub fn set_brief(&mut self, brief: bool) {
         self.brief = brief;
     }

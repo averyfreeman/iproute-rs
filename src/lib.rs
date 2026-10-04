@@ -14,6 +14,7 @@ mod error;
 mod mac;
 mod result;
 
+/// Exposes the public `item` value.
 pub use self::{
     color::CliColor,
     error::CliError,
