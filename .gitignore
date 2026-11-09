@@ -1,14 +1,5 @@
-
-# Local credentials and generated development files
-.DS_Store
-node_modules/
-.venv/
-.build/
-.uv-cache/
-.gocache/
-__pycache__/
-.pytest_cache/
-.ruff_cache/
-.next/
-.gradle/
-.env*
+/target
+/Cargo.lock
+*.swp
+tags
+AGENTS.md
