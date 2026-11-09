@@ -185,6 +185,17 @@ fn parse_get_config(
                     family = addr_to_family(&addr);
                 }
             }
+            "as" => {
+                let val = iter.next().ok_or_else(|| {
+                    CliError::from("\"as\" requires a source address")
+                })?;
+                let (addr, plen) = parse_get_prefix(val)?;
+                from = Some(addr);
+                from_len = plen;
+                if family == AddressFamily::Unspec {
+                    family = addr_to_family(&addr);
+                }
+            }
             "tos" | "dsfield" => {
                 let val = iter.next().ok_or_else(|| {
                     CliError::from("\"tos\" requires a value")
@@ -212,14 +223,24 @@ fn parse_get_config(
                 );
             }
             "vrf" => {
+<<<<<<< HEAD
                 vrf = Some(
                     iter.next()
                         .ok_or_else(|| {
                             CliError::from("\"vrf\" requires a value")
+=======
+                // A VRF lookup is represented by the VRF device as the
+                // output interface in RTM_GETROUTE.
+                oif = Some(
+                    iter.next()
+                        .ok_or_else(|| {
+                            CliError::from("\"vrf\" requires a name")
+>>>>>>> d38ad7f (feat: extend Linux ip command coverage)
                         })?
                         .clone(),
                 );
             }
+<<<<<<< HEAD
             "as" => {
                 let mut val = iter
                     .next()
@@ -237,6 +258,8 @@ fn parse_get_config(
                 }
                 newdst = Some(addr);
             }
+=======
+>>>>>>> d38ad7f (feat: extend Linux ip command coverage)
             "mark" => {
                 let val = iter.next().ok_or_else(|| {
                     CliError::from("\"mark\" requires a value")

@@ -8,8 +8,13 @@ use iproute_rs::{
 };
 use rtnetlink::packet_route::link::{
     LinkAttribute, LinkExtentMask, LinkFlags, LinkInfo, LinkLayerType,
+<<<<<<< HEAD
     LinkMessage, LinkVfInfo, Prop, Stats, Stats64, VfInfo, VfInfoBroadcast,
     VfInfoMac, VfLinkState, VfStats as NlVfStats, VfVlan, VlanProtocol,
+=======
+    LinkMessage, LinkVfInfo, Prop, Stats64, VfInfo, VfInfoBroadcast, VfInfoMac,
+    VfLinkState, VfStats as NlVfStats, VfVlan, VlanProtocol,
+>>>>>>> d38ad7f (feat: extend Linux ip command coverage)
 };
 use serde::Serialize;
 
@@ -77,10 +82,63 @@ pub(crate) struct CliLinkInfo {
     addr_stats: Option<CliLinkStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     vfinfo_list: Option<Vec<CliVfInfo>>,
+    /// Standard link counters shown by `ip -s link`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stats64: Option<CliLinkStats64>,
     #[serde(skip)]
     num_vf: Option<u32>,
     #[serde(skip)]
     kind: String,
+}
+
+/// JSON/text representation of Linux `rtnl_link_stats64` counters.
+#[derive(Debug, Clone, Default, Serialize)]
+struct CliLinkStats64 {
+    rx: CliLinkRxStats,
+    tx: CliLinkTxStats,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct CliLinkRxStats {
+    bytes: u64,
+    packets: u64,
+    errors: u64,
+    dropped: u64,
+    over_errors: u64,
+    multicast: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct CliLinkTxStats {
+    bytes: u64,
+    packets: u64,
+    errors: u64,
+    dropped: u64,
+    carrier_errors: u64,
+    collisions: u64,
+}
+
+impl From<Stats64> for CliLinkStats64 {
+    fn from(value: Stats64) -> Self {
+        Self {
+            rx: CliLinkRxStats {
+                bytes: value.rx_bytes,
+                packets: value.rx_packets,
+                errors: value.rx_errors,
+                dropped: value.rx_dropped,
+                over_errors: value.rx_over_errors,
+                multicast: value.multicast,
+            },
+            tx: CliLinkTxStats {
+                bytes: value.tx_bytes,
+                packets: value.tx_packets,
+                errors: value.tx_errors,
+                dropped: value.tx_dropped,
+                carrier_errors: value.tx_carrier_errors,
+                collisions: value.collisions,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -732,14 +790,31 @@ impl CliLinkInfo {
         self.brief = brief;
     }
 
+<<<<<<< HEAD
+=======
+    /// Select `ip -o`-style one-line rendering.
+>>>>>>> d38ad7f (feat: extend Linux ip command coverage)
     pub fn set_oneline(&mut self, oneline: bool) {
         self.oneline = oneline;
     }
 
+<<<<<<< HEAD
     /// `ip address show -s` prints the link statistics after the address
     /// list, so move them to the field serialized at that position.
     pub fn move_stats_after_addr_info(&mut self) {
         self.addr_stats = self.stats.take();
+=======
+    /// Keep standard and VF counters only when `-s` was requested.
+    pub fn set_show_stats(&mut self, show_stats: bool) {
+        if !show_stats {
+            self.stats64 = None;
+            if let Some(vfs) = self.vfinfo_list.as_mut() {
+                for vf in vfs {
+                    vf.stats = None;
+                }
+            }
+        }
+>>>>>>> d38ad7f (feat: extend Linux ip command coverage)
     }
 }
 
@@ -824,7 +899,11 @@ impl std::fmt::Display for CliLinkInfo {
         if let Some(v) = self.txqlen {
             write!(f, "qlen {v}")?;
         }
-        write!(f, "\n    ")?;
+        if self.oneline {
+            write!(f, " ")?;
+        } else {
+            write!(f, "\n    ")?;
+        }
         write!(f, "link/{} ", self.link_type)?;
         if !self.address.is_empty() {
             write_with_color!(f, CliColor::Mac, "{}", self.address)?;
@@ -865,7 +944,11 @@ impl std::fmt::Display for CliLinkInfo {
         }
 
         for altname in &self.altnames {
-            write!(f, "\n    altname {altname}")?;
+            if self.oneline {
+                write!(f, " altname {altname}")?;
+            } else {
+                write!(f, "\n    altname {altname}")?;
+            }
         }
 
         if let Some(addr_info) = &self.addr_info {
@@ -877,7 +960,11 @@ impl std::fmt::Display for CliLinkInfo {
                 writeln!(f)?;
             } else {
                 for addr in addr_info {
-                    write!(f, "\n    {}", addr)?;
+                    if self.oneline {
+                        write!(f, " {}", addr)?;
+                    } else {
+                        write!(f, "\n    {}", addr)?;
+                    }
                 }
             }
         }
@@ -888,8 +975,45 @@ impl std::fmt::Display for CliLinkInfo {
 
         if let Some(vfinfo_list) = &self.vfinfo_list {
             for vf in vfinfo_list {
-                write!(f, "{vf}")?;
+                let rendered = vf.to_string();
+                if self.oneline {
+                    write!(f, " {}", rendered.replace('\n', " "))?;
+                } else {
+                    write!(f, "{rendered}")?;
+                }
             }
+        }
+
+        if let Some(stats) = &self.stats64 {
+            let separator = if self.oneline { " " } else { "\n    " };
+            write!(
+                f,
+                "{separator}RX: bytes packets errors dropped overrun mcast"
+            )?;
+            write!(
+                f,
+                "{separator}{:>10} {:>8} {:>6} {:>7} {:>7} {:>7}",
+                stats.rx.bytes,
+                stats.rx.packets,
+                stats.rx.errors,
+                stats.rx.dropped,
+                stats.rx.over_errors,
+                stats.rx.multicast,
+            )?;
+            write!(
+                f,
+                "{separator}TX: bytes packets errors dropped carrier collsns"
+            )?;
+            write!(
+                f,
+                "{separator}{:>10} {:>8} {:>6} {:>7} {:>7} {:>7}",
+                stats.tx.bytes,
+                stats.tx.packets,
+                stats.tx.errors,
+                stats.tx.dropped,
+                stats.tx.carrier_errors,
+                stats.tx.collisions,
+            )?;
         }
 
         Ok(())
@@ -1050,7 +1174,11 @@ impl LinkShowFilter {
 pub(crate) async fn handle_show(
     opts: &[&str],
     include_details: bool,
+<<<<<<< HEAD
     statistics: u8,
+=======
+    include_stats: bool,
+>>>>>>> d38ad7f (feat: extend Linux ip command coverage)
     oneline: bool,
 ) -> Result<Vec<CliLinkInfo>, CliError> {
     let filter = LinkShowFilter::parse(opts)?;
@@ -1072,9 +1200,16 @@ pub(crate) async fn handle_show(
     let mut ifaces: Vec<CliLinkInfo> = Vec::new();
 
     while let Some(nl_msg) = links.try_next().await? {
+<<<<<<< HEAD
         ifaces.push(
             parse_nl_msg_to_iface(nl_msg, include_details, statistics).await?,
         );
+=======
+        let mut iface = parse_nl_msg_to_iface(nl_msg, include_details).await?;
+        iface.set_show_stats(include_stats);
+        iface.set_oneline(oneline);
+        ifaces.push(iface);
+>>>>>>> d38ad7f (feat: extend Linux ip command coverage)
     }
 
     resolve_controller_and_link_names(&mut ifaces);
@@ -1221,9 +1356,13 @@ pub(crate) async fn parse_nl_msg_to_iface(
                 ret.vfinfo_list = Some(vfs);
             }
             LinkAttribute::NumVf(n) => ret.num_vf = Some(n),
+<<<<<<< HEAD
             LinkAttribute::Stats64(s) if statistics > 0 => stats64 = Some(s),
             LinkAttribute::Stats(s) if statistics > 0 => stats32 = Some(s),
             LinkAttribute::CarrierChanges(v) => carrier_changes = Some(v),
+=======
+            LinkAttribute::Stats64(stats) => ret.stats64 = Some(stats.into()),
+>>>>>>> d38ad7f (feat: extend Linux ip command coverage)
             LinkAttribute::LinkInfo(infos) => {
                 for info in &infos {
                     if let LinkInfo::Kind(k) = info {

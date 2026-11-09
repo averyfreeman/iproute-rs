@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: MIT
 
+//! Rust implementation building blocks for the Linux `ip` command.
+//!
+//! The binary in this package translates compatibility-oriented command-line
+//! arguments into Linux route-netlink requests through [`rtnetlink`].  Output
+//! models implement the small [`CanDisplay`] and [`CanOutput`] traits used by
+//! the standalone formatter.  The implementation is Linux-first: kernel
+//! capabilities, loaded link modules, and the active network namespace remain
+//! part of the runtime contract.
+
 mod color;
 mod error;
 mod mac;

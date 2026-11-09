@@ -329,7 +329,7 @@ impl RouteCommand {
             handle_flush(
                 &opts,
                 preferred_family,
-                matches.get_count("DETAILS") > 0,
+                matches.get_flag("STATISTICS"),
             )
             .await?;
             Ok(vec![])
@@ -339,15 +339,27 @@ impl RouteCommand {
                 .unwrap_or_default()
                 .map(String::as_str)
                 .collect();
-            handle_show(
+            let mut routes = handle_show(
                 &opts,
                 preferred_family,
                 matches.get_count("DETAILS") > 0,
             )
-            .await
+            .await?;
+            for route in &mut routes {
+                route.set_oneline(matches.get_flag("ONELINE"));
+            }
+            Ok(routes)
         } else {
-            handle_show(&[], preferred_family, matches.get_count("DETAILS") > 0)
-                .await
+            let mut routes = handle_show(
+                &[],
+                preferred_family,
+                matches.get_count("DETAILS") > 0,
+            )
+            .await?;
+            for route in &mut routes {
+                route.set_oneline(matches.get_flag("ONELINE"));
+            }
+            Ok(routes)
         }
     }
 }

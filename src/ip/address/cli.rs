@@ -246,8 +246,13 @@ impl AddressCommand {
                 matches.get_count("DETAILS") > 0,
                 preferred_family,
                 matches.get_flag("BRIEF"),
+<<<<<<< HEAD
                 matches.get_flag("ONELINE"),
                 matches.get_count("STATISTICS"),
+=======
+                matches.get_flag("STATISTICS"),
+                matches.get_flag("ONELINE"),
+>>>>>>> d38ad7f (feat: extend Linux ip command coverage)
             )
             .await
         } else {
@@ -256,8 +261,13 @@ impl AddressCommand {
                 matches.get_count("DETAILS") > 0,
                 preferred_family,
                 matches.get_flag("BRIEF"),
+<<<<<<< HEAD
                 matches.get_flag("ONELINE"),
                 matches.get_count("STATISTICS"),
+=======
+                matches.get_flag("STATISTICS"),
+                matches.get_flag("ONELINE"),
+>>>>>>> d38ad7f (feat: extend Linux ip command coverage)
             )
             .await
         }
